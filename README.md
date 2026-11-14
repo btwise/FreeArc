@@ -187,6 +187,7 @@ xcodebuild -configuration Release build
 scripts/make_release.sh                # 本机架构
 scripts/make_release.sh --universal    # Apple 芯片 + Intel（需要能交叉编译）
 scripts/make_release.sh --package-only # 不编译，直接打包现有 build/FreeArc.app
+scripts/make_release.sh --publish      # 出包后直接创建 GitHub Release
 ```
 
 脚本会编译、校验签名、生成 `dist/FreeArc-<版本>.zip`（内部根目录就是 `FreeArc.app`），并打印架构、tag 名、大小与 SHA256。
@@ -199,13 +200,26 @@ scripts/make_release.sh --package-only --universal
 
 `--package-only` 只做「校验版本 + 校验签名 + 打包 + 打印 SHA256」，不会覆盖你手动编出来的通用包。
 
-**发 Release**：仓库 → Releases → Draft a new release，约定三条：
+**写发布说明**：正文手写，放在 `ReleaseNotes/<版本>.md`（例：`ReleaseNotes/1.2.0.md`），会原样成为 Release body，也就是用户更新弹窗里读到的那段文字。缺文件时脚本会按提交记录生成草稿并提醒补充。
+
+写的时候注意两点：更新弹窗是纯文本视图（不渲染 Markdown），普通段落加 `-` 列表最稳，`##`、`**` 会原样显示成符号；不用在说明里手抄大小和 SHA256——脚本会自动把「安装包（架构、大小）」与 `SHA256` 追加到 `dist/FreeArc-<版本>-notes.md` 末尾，校验值永远抄不错。
+
+**发 Release**：一条命令，或网页手动。约定三条：
 
 | 项 | 要求 |
 |---|---|
 | Tag | `v1.2.0` 形式，严格三段语义化版本；程序用它和本地版本比较 |
 | Asset | `FreeArc-1.2.0.zip`，文件名必须和版本对应（更新器优先精确匹配，退而匹配名字含 freearc 的 .zip） |
-| 说明 | 写在 Release body 里，Markdown 原样显示在更新弹窗的滚动区 |
+| 说明 | `ReleaseNotes/<版本>.md`，脚本拼好校验信息后写到 `dist/FreeArc-<版本>-notes.md` |
+
+```bash
+scripts/make_release.sh --package-only --publish   # 需要 gh 已安装并登录
+# 等价于：
+gh release create v1.2.0 dist/FreeArc-1.2.0.zip \
+    --title "FreeArc 1.2.0" --notes-file dist/FreeArc-1.2.0-notes.md
+```
+
+`--publish` 动手前先确认三件事：`gh` 已登录、本地提交已推送（Release 指向远程 HEAD）、远端还没有同名 tag。
 
 不要勾选 *Pre-release* 或保持 *Draft*——`releases/latest` 接口会跳过它们，客户端永远看不到。
 
@@ -248,6 +262,7 @@ Vendor/
 Resources/              Info.plist、扩展 plist、entitlements、icns
 assets/screenshots/     README 用的界面截图
 Samples/                手动测试用样本包（GBK 文件名、多层目录）
+ReleaseNotes/           每个版本的发布说明（= 更新弹窗正文），按版本号命名
 scripts/                make_app.sh 打包 / make_release.sh 出发布包 / make_icon.sh 图标 / copy_7zz.sh 内核拷贝
 tools/                  icongen（与 App 共用 IconArtwork 生成 icns）
 FreeArc.xcodeproj       Xcode 工程（与 Package.swift 同构）
