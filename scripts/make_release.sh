@@ -29,11 +29,17 @@ echo "==> 打包应用"
 APP="build/$APP_NAME.app"
 [[ -d "$APP" ]] || { echo "未生成 $APP" >&2; exit 1; }
 
+# 请求了通用二进制却只出单架构（交叉编译失败时 make_app.sh 会回退），必须让人看见
+ARCHS="$(lipo -archs "$APP/Contents/MacOS/$APP_NAME" 2>/dev/null || echo unknown)"
+if [[ "$*" == *--universal* && "$ARCHS" != *arm64* ]]; then
+    echo "!! 产物架构是 ${ARCHS}，不是通用二进制：交叉编译失败已回退，请换 Apple 芯片机器或 Xcode Archive 重出" >&2
+fi
+
 # Info.plist 里的版本必须和资产名一致，否则客户端会比错版本
 PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
     "$APP/Contents/Info.plist" 2>/dev/null || true)"
 if [[ "$PLIST_VERSION" != "$VERSION" ]]; then
-    echo "版本不一致：Info.plist=$PLIST_VERSION，源码=$VERSION" >&2
+    echo "版本不一致：Info.plist=${PLIST_VERSION}，源码=${VERSION}" >&2
     exit 1
 fi
 

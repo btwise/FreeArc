@@ -73,7 +73,7 @@ fi
 BIN_PATH=""
 FINDER_BIN=""
 if [[ $UNIVERSAL -eq 1 ]]; then
-    echo "==> swift build -c $CONFIG（arm64 + x86_64）"
+    echo "==> swift build -c ${CONFIG}（arm64 + x86_64）"
     PRODUCTS_DIR=".build/apple/Products/Release"
     [[ $CONFIG == "debug" ]] && PRODUCTS_DIR=".build/apple/Products/Debug"
     if swift build -c "$CONFIG" --arch arm64 --arch x86_64 --disable-sandbox; then
