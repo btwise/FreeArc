@@ -87,8 +87,11 @@ final class ArchiveWindowRouter {
         ) { [weak self] note in
             guard let closed = note.object as? NSWindow else { return }
             // 延迟一拍再放手：让本轮 autorelease pool 先安全收尾、SwiftUI 宿主视图完成清理。
-            // 闭包对 closed 的强捕获保证这段时间内窗口不会被 dealloc。
-            DispatchQueue.main.async { [weak self] in
+            // 必须弱引用捕获：这个观察者对全应用窗口生效（object: nil），包括不走
+            // retainOwnedWindow 的窗口（如更新进度窗）。强捕获会在窗口 dealloc 之后
+            // 再 objc_retain 僵尸对象 → SIGSEGV（v1.2.1 关闭更新窗实测崩溃）。
+            DispatchQueue.main.async { [weak self, weak closed] in
+                guard let closed else { return }
                 self?.ownedWindows.removeAll { $0 === closed }
             }
         }

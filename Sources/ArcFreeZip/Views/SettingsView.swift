@@ -1801,7 +1801,8 @@ private struct UpdateSettingsCard: View {
         case .notConfigured: return "更新源尚未配置（开源发布后自动生效）"
         case .upToDate: return "已是最新版本 v\(AppUpdate.currentVersion)"
         case .available(let release): return "发现新版本 v\(release.version)"
-        case .downloading(let fraction): return "下载中 \(Int((fraction * 100).rounded()))%"
+        case .downloading(let fraction, _, _): return "下载中 \(Int((fraction * 100).rounded()))%"
+        case .readyToInstall: return "已下载完成，等待安装"
         case .installing: return "正在安装，完成后自动重启"
         case .failed(let message): return "检查失败：\(message)"
         }

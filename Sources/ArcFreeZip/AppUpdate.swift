@@ -57,7 +57,7 @@ enum AppUpdateConfig {
 /// 本地版本号（**单一版本源**）。scripts/make_app.sh 打包时从这里抓取并
 /// 同步进 Info.plist 的 CFBundleShortVersionString，两处永远一致。
 enum AppUpdate {
-    static let currentVersion = "1.2.1"
+    static let currentVersion = "1.2.2"
 }
 
 // MARK: - 更新中心
@@ -75,7 +75,9 @@ final class UpdateCenter: ObservableObject {
         case notConfigured
         case upToDate
         case available(ReleaseInfo)
-        case downloading(fraction: Double)
+        case downloading(fraction: Double, received: Int64, total: Int64)
+        /// 已下载完成，等用户点「安装并重启应用」（两段式：下载与安装分离，安装前可反悔）
+        case readyToInstall(ReleaseInfo)
         case installing
         case failed(message: String)
     }
@@ -91,13 +93,19 @@ final class UpdateCenter: ObservableObject {
 
     var isBusy: Bool {
         switch state {
-        case .checking, .downloading, .installing: return true
+        case .checking, .downloading, .readyToInstall, .installing: return true
         default: return false
         }
     }
 
     private var progressSession: URLSession?
     private var progressWindow: NSWindow?
+    private var progressCloseObserver: NSObjectProtocol?
+    /// 更新介绍窗口（.available 阶段）
+    private var promptWindow: NSWindow?
+    private var promptCloseObserver: NSObjectProtocol?
+    /// 已下载待安装的数据（9~10 MB 内存态；安装或放弃后释放）
+    private var pendingInstall: (release: ReleaseInfo, data: Data)?
 
     // MARK: 检查
 
@@ -109,6 +117,7 @@ final class UpdateCenter: ObservableObject {
 
     /// 启动 10 秒后静默检查（每 24h 最多一次；未配置或用户关闭自动检查则跳过）。
     func scheduleStartupCheck() {
+        Self.cleanupStaleBackups()
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
             Task { await self?.autoCheckIfNeeded() }
         }
@@ -331,57 +340,114 @@ final class UpdateCenter: ObservableObject {
         }
     }
 
-    // MARK: 更新弹窗
+    // MARK: 更新介绍窗口
 
-    /// 更新介绍弹窗：版本号 + Release Notes（滚动区）+ 三选一。
+    /// 「发现新版本」窗口：图标 + 摘要 + Markdown 渲染的发布说明 + 按钮条。
+    /// 不再用 NSAlert：Release Notes 需要一个能滚动、可选中的阅读区，弹窗太挤。
     func presentUpdateDialog() {
         guard case .available(let release) = state else { return }
-        // 探针：AFZ_PROBE_UPDATE_AUTO=1 直接进入下载（端到端自动化验证用，内存态）
-        if ProcessInfo.processInfo.environment["AFZ_PROBE"] == "1",
-           ProcessInfo.processInfo.environment["AFZ_PROBE_UPDATE_AUTO"] == "1" {
+        // 探针：AFZ_PROBE_UPDATE_AUTO=1 直接进入下载并自动安装（端到端验证用，内存态）；
+        // AFZ_PROBE_UPDATE_READY=1 只自动点「立即更新」，停在就绪窗口（界面核对用）
+        let env = ProcessInfo.processInfo.environment
+        if env["AFZ_PROBE"] == "1" {
+            FileHandle.standardError.write("PROBE: presentUpdateDialog v\(release.version)\n".data(using: .utf8)!)
+        }
+        if env["AFZ_PROBE"] == "1" && env["AFZ_PROBE_UPDATE_AUTO"] == "1" {
             startDownload(release)
             return
         }
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "发现新版本 v\(release.version)"
-        alert.informativeText = "当前版本 v\(AppUpdate.currentVersion) · 安装包 \(afzByteText(release.assetSize))"
-
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 200))
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 420, height: 200))
-        text.isEditable = false
-        text.font = .systemFont(ofSize: 12)
-        text.string = release.notes
-        text.autoresizingMask = [.width]
-        scroll.documentView = text
-        alert.accessoryView = scroll
-
-        alert.addButton(withTitle: "下载并更新")
-        alert.addButton(withTitle: "跳过此版本")
-        alert.addButton(withTitle: "稍后")
-        NSApp.activate(ignoringOtherApps: true)
-        let response = alert.runModal()
-        switch response {
-        case .alertFirstButtonReturn:
-            startDownload(release)
-        case .alertSecondButtonReturn:
-            AppSettings.updateSkippedVersion = release.version
-            state = .idle
-        default:
-            state = .idle
+        if env["AFZ_PROBE"] == "1" && env["AFZ_PROBE_UPDATE_READY"] == "1" {
+            acceptUpdate()
+            return
         }
+        showPromptWindow(release)
+    }
+
+    private var probeAutoInstall: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return env["AFZ_PROBE"] == "1" && env["AFZ_PROBE_UPDATE_AUTO"] == "1"
+    }
+
+    private func showPromptWindow(_ release: ReleaseInfo) {
+        if let window = promptWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 470, height: 430),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
+        )
+        window.title = "软件更新"
+        window.isReleasedWhenClosed = false
+        window.isMovableByWindowBackground = false
+        window.contentView = NSHostingView(rootView: UpdatePromptView(release: release))
+        window.center()
+        promptCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                self?.promptWindowClosedByUser()
+            }
+        }
+        promptWindow = window
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func closePromptWindow() {
+        if let observer = promptCloseObserver {
+            NotificationCenter.default.removeObserver(observer)
+            promptCloseObserver = nil
+        }
+        promptWindow?.orderOut(nil)
+        promptWindow?.close()
+        promptWindow = nil
+    }
+
+    /// 用户点标题栏关闭钮 = 「稍后再说」（不记忆跳过版本，下次启动仍会提醒）
+    private func promptWindowClosedByUser() {
+        guard promptWindow != nil else { return }
+        closePromptWindow()
+        if case .available = state { state = .idle }
+    }
+
+    /// 立即更新（介绍窗口主按钮）
+    func acceptUpdate() {
+        guard case .available(let release) = state else { return }
+        closePromptWindow()
+        startDownload(release)
+    }
+
+    /// 跳过此版本（持久化，本版本不再自动打扰）
+    func skipUpdate() {
+        if case .available(let release) = state {
+            AppSettings.updateSkippedVersion = release.version
+        }
+        closePromptWindow()
+        state = .idle
+    }
+
+    /// 稍后提醒（本次不打扰）
+    func deferUpdate() {
+        closePromptWindow()
+        state = .idle
     }
 
     // MARK: 下载
 
     private func startDownload(_ release: ReleaseInfo) {
-        state = .downloading(fraction: 0)
+        if ProcessInfo.processInfo.environment["AFZ_PROBE"] == "1" {
+            FileHandle.standardError.write("PROBE: startDownload \(release.version) size=\(release.assetSize)\n".data(using: .utf8)!)
+        }
+        state = .downloading(fraction: 0, received: 0, total: release.assetSize)
         showProgressPanel()
-        let delegate = DownloadDelegate { [weak self] fraction in
+        let delegate = DownloadDelegate { [weak self] fraction, received, total in
             Task { @MainActor [weak self] in
-                self?.state = .downloading(fraction: fraction)
+                // 个别响应拿不到 Content-Length（expectedContentLength = -1），
+                // 回退用资产大小，保证「已下载 / 总大小」始终成对出现
+                let effectiveTotal = total > 0 ? total : release.assetSize
+                self?.state = .downloading(fraction: fraction, received: received, total: effectiveTotal)
             }
         } completion: { [weak self] result in
             Task { @MainActor [weak self] in
@@ -395,11 +461,55 @@ final class UpdateCenter: ObservableObject {
         session.dataTask(with: release.downloadURL).resume()
     }
 
+    /// 用户取消下载：中断会话、关窗、回到空闲。
     func cancelDownload() {
         progressSession?.invalidateAndCancel()
         progressSession = nil
+        pendingInstall = nil
         closeProgressPanel()
         state = .idle
+    }
+
+    /// 放弃已下载的更新（就绪阶段点关闭/取消）：数据直接丢弃。
+    func discardPendingInstall() {
+        progressSession?.invalidateAndCancel()
+        progressSession = nil
+        pendingInstall = nil
+        closeProgressPanel()
+        state = .idle
+    }
+
+    /// 就绪阶段的「安装并重启应用」。
+    func installNow() {
+        guard case .readyToInstall = state, let pending = pendingInstall else { return }
+        state = .installing
+        let data = pending.data
+        let version = pending.release.version
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                try Self.installDownloaded(data: data, version: version)
+                await MainActor.run { [weak self] in
+                    self?.pendingInstall = nil
+                    self?.closeProgressPanel()
+                    self?.state = .idle
+                    self?.relaunch()
+                }
+            } catch let error as UpdateError {
+                await MainActor.run { [weak self] in
+                    self?.pendingInstall = nil
+                    self?.closeProgressPanel()
+                    self?.state = .failed(message: error.message)
+                    self?.presentFailureAlert(stage: "安装更新", detail: error.message)
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    self?.pendingInstall = nil
+                    self?.closeProgressPanel()
+                    self?.state = .failed(message: error.localizedDescription)
+                    self?.presentFailureAlert(stage: "安装更新", detail: error.localizedDescription)
+                }
+            }
+        }
     }
 
     private func finishDownload(_ result: Result<Data, Error>, release: ReleaseInfo) {
@@ -421,29 +531,10 @@ final class UpdateCenter: ObservableObject {
                 presentFailureAlert(stage: "下载更新包", detail: "下载内容为空，可能是网络中断")
                 return
             }
-            state = .installing
-            Task.detached(priority: .userInitiated) { [weak self] in
-                do {
-                    try Self.installDownloaded(data: data, version: release.version)
-                    await MainActor.run { [weak self] in
-                        self?.closeProgressPanel()
-                        self?.state = .idle
-                        self?.relaunch()
-                    }
-                } catch let error as UpdateError {
-                    await MainActor.run { [weak self] in
-                        self?.closeProgressPanel()
-                        self?.state = .failed(message: error.message)
-                        self?.presentFailureAlert(stage: "安装更新", detail: error.message)
-                    }
-                } catch {
-                    await MainActor.run { [weak self] in
-                        self?.closeProgressPanel()
-                        self?.state = .failed(message: error.localizedDescription)
-                        self?.presentFailureAlert(stage: "安装更新", detail: error.localizedDescription)
-                    }
-                }
-            }
+            pendingInstall = (release, data)
+            state = .readyToInstall(release)
+            // 探针链路：下载完自动安装，不等人点按钮
+            if probeAutoInstall { installNow() }
         }
     }
 
@@ -490,26 +581,43 @@ final class UpdateCenter: ObservableObject {
         } catch {
             throw UpdateError(message: "复制新版本失败（目标：\(staging.path)）\n\(error.localizedDescription)")
         }
-        if fm.fileExists(atPath: dest.path) {
-            do {
-                try fm.removeItem(at: dest)
-            } catch {
-                // 旧版本目录暂时删不掉（可能正被系统占用）：降级改名让位
-                let backup = dest.deletingLastPathComponent()
-                    .appendingPathComponent(".afz-old-\(UUID().uuidString)")
-                if (try? fm.moveItem(at: dest, to: backup)) == nil {
-                    try? fm.removeItem(at: staging)
-                    throw UpdateError(message: "旧版本目录被占用，无法替换：\(dest.path)\n\(error.localizedDescription)")
-                }
-            }
+        // 运行中的应用包**不能删除**：进程虽然靠已映射的二进制继续活着，但包没了之后
+        // 任何延迟的资源加载都可能崩（实测关闭窗口时 SIGSEGV）。改名让位对运行中的
+        // 进程是无害的——inode 与映射都不变——新包顶上原位后，旧目录由下次启动的
+        // cleanupStaleBackups() 清理。
+        let backup = dest.deletingLastPathComponent()
+            .appendingPathComponent(".afz-old-\(UUID().uuidString)")
+        do {
+            try fm.moveItem(at: dest, to: backup)
+        } catch {
+            try? fm.removeItem(at: staging)
+            throw UpdateError(message: "旧版本目录无法让位：\(dest.path)\n\(error.localizedDescription)")
         }
         do {
             try fm.moveItem(at: staging, to: dest)
         } catch {
+            // 新包就位失败：尽力把旧包挪回原位，保住可用状态
+            try? fm.moveItem(at: backup, to: dest)
             try? fm.removeItem(at: staging)
             throw UpdateError(message: "新版本就位失败：\(error.localizedDescription)")
         }
         try? runTool("/usr/bin/xattr", ["-dr", "com.apple.quarantine", dest.path])
+    }
+
+    /// 清理历史更新留下的旧包目录（`.afz-old-*` / `.afz-install-*`）。
+    /// 只清创建超过 60 秒的：刚改名让位的目录可能还被上一个正在退出的实例使用。
+    nonisolated static func cleanupStaleBackups() {
+        let fm = FileManager.default
+        let dir = Bundle.main.bundleURL.deletingLastPathComponent()
+        guard let items = try? fm.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        for item in items {
+            let name = item.lastPathComponent
+            guard name.hasPrefix(".afz-old-") || name.hasPrefix(".afz-install-") else { continue }
+            let modified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
+            guard Date().timeIntervalSince(modified) > 60 else { continue }
+            try? fm.removeItem(at: item)
+        }
     }
 
     private nonisolated static func runTool(_ path: String, _ args: [String]) throws {
@@ -539,29 +647,60 @@ final class UpdateCenter: ObservableObject {
         }
     }
 
-    // MARK: 下载进度浮窗
+    // MARK: 更新进度窗口
 
+    /// 下载 / 就绪 / 安装三个阶段共用一个标准标题栏窗口（标题「正在更新 FreeArc」）。
+    /// 必须设 isReleasedWhenClosed = false：ARC 下 AppKit 在 close 时对默认为 true 的
+    /// 窗口多发一次 release，会把窗口过度释放——全局 willClose 观察者随后 retain 僵尸
+    /// 对象直接 SIGSEGV（v1.2.1 实测崩溃，见 WindowRouting.retainOwnedWindow 注释）。
     private func showProgressPanel() {
-        guard progressWindow == nil else { return }
-        let hosting = NSHostingView(rootView: UpdateProgressPanelView())
+        if let window = progressWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 130),
-            styleMask: [.titled], backing: .buffered, defer: false
+            contentRect: NSRect(x: 0, y: 0, width: 430, height: 168),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
         )
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.isMovableByWindowBackground = true
-        window.contentView = hosting
+        window.title = "正在更新 FreeArc"
+        window.isReleasedWhenClosed = false
+        window.isMovableByWindowBackground = false
+        window.contentView = NSHostingView(rootView: UpdateProgressView())
         window.center()
+        progressCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                self?.progressWindowClosedByUser()
+            }
+        }
+        progressWindow = window
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        progressWindow = window
     }
 
     private func closeProgressPanel() {
+        if let observer = progressCloseObserver {
+            NotificationCenter.default.removeObserver(observer)
+            progressCloseObserver = nil
+        }
         progressWindow?.orderOut(nil)
         progressWindow?.close()
         progressWindow = nil
+    }
+
+    /// 标题栏关闭钮的语义随阶段变化：下载中=取消下载，就绪=放弃安装，安装中=仅关窗。
+    private func progressWindowClosedByUser() {
+        guard progressWindow != nil else { return }
+        switch state {
+        case .downloading:
+            cancelDownload()
+        case .readyToInstall:
+            discardPendingInstall()
+        default:
+            closeProgressPanel()
+        }
     }
 
     // MARK: 提示弹窗
@@ -634,13 +773,13 @@ private struct UpdateError: Error {
 /// URLSession 数据代理：汇总进度与完成结果。
 /// 所有回调都在 session 的串行队列上，buffer/expectedLength 无并发竞争。
 private final class DownloadDelegate: NSObject, URLSessionDataDelegate {
-    private let onProgress: @Sendable (Double) -> Void
+    private let onProgress: @Sendable (Double, Int64, Int64) -> Void
     private let completion: @Sendable (Result<Data, Error>) -> Void
     private let lock = NSLock()
     private var buffer = Data()
     private var expectedLength: Int64 = -1
 
-    init(onProgress: @escaping @Sendable (Double) -> Void,
+    init(onProgress: @escaping @Sendable (Double, Int64, Int64) -> Void,
          completion: @escaping @Sendable (Result<Data, Error>) -> Void) {
         self.onProgress = onProgress
         self.completion = completion
@@ -657,12 +796,11 @@ private final class DownloadDelegate: NSObject, URLSessionDataDelegate {
                     didReceive data: Data) {
         lock.lock()
         buffer.append(data)
-        let received = buffer.count
+        let received = Int64(buffer.count)
         let total = expectedLength
         lock.unlock()
-        if total > 0 {
-            onProgress(min(1, Double(received) / Double(total)))
-        }
+        let fraction = total > 0 ? min(1, Double(received) / Double(total)) : 0
+        onProgress(fraction, received, max(total, 0))
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask,
@@ -679,39 +817,252 @@ private final class DownloadDelegate: NSObject, URLSessionDataDelegate {
     }
 }
 
-// MARK: - 下载进度浮窗视图
+// MARK: - 更新窗口视图
 
-struct UpdateProgressPanelView: View {
+/// Release Notes 的块级 Markdown 渲染。
+/// SwiftUI 的 `Text(AttributedString)` 只认字符级属性，不认块级意图——标题会掉字号、
+/// 列表符号直接消失。这里按行自渲染：标题加粗放大、列表补圆点/编号、引用块灰字缩进，
+/// 行内样式（加粗/斜体/行内代码）交给系统的 inline 解析。
+private enum UpdateNotesRenderer {
+    static func render(_ markdown: String) -> AttributedString {
+        var result = AttributedString()
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false)
+        for raw in lines {
+            let line = String(raw).trimmingCharacters(in: .whitespaces)
+            if line.isEmpty {
+                result.append(AttributedString("\n"))
+                continue
+            }
+            result.append(block(for: line))
+            result.append(AttributedString("\n"))
+        }
+        return result
+    }
+
+    private static func block(for line: String) -> AttributedString {
+        // 标题：# ～ ######，两级字号足够（Release Notes 不会更深）
+        if line.hasPrefix("#") {
+            let level = line.prefix(while: { $0 == "#" }).count
+            let text = line.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespaces)
+            var content = inline(text)
+            if level <= 2 {
+                content.mergeAttributes(fontContainer(size: level == 1 ? 16 : 14, weight: .semibold))
+            }
+            return content
+        }
+        // 无序列表：补圆点符号
+        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("• ") {
+            let body = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            return AttributedString("•  ") + inline(body)
+        }
+        // 有序列表：编号与正文拉开固定间距
+        if let body = numberedBody(line) {
+            let numberEnd = line.index(line.startIndex, offsetBy: line.count - body.count)
+            let number = String(line[..<numberEnd]).trimmingCharacters(in: .whitespaces)
+            return AttributedString("\(number)  ") + inline(body)
+        }
+        // 引用块：灰字
+        if line.hasPrefix(">") {
+            var content = inline(line.dropFirst().trimmingCharacters(in: .whitespaces))
+            content.mergeAttributes(foregroundContainer(.secondary))
+            return content
+        }
+        return inline(line)
+    }
+
+    /// `1. xxx` / `2) xxx` → 正文部分；不是有序列表返回 nil
+    private static func numberedBody(_ line: String) -> String? {
+        guard let first = line.first, first.isNumber else { return nil }
+        guard let dot = line.firstIndex(where: { $0 == "." || $0 == ")" }) else { return nil }
+        let after = line.index(after: dot)
+        let body = line[after...].trimmingCharacters(in: .whitespaces)
+        return body.isEmpty ? nil : String(body)
+    }
+
+    /// 行内 Markdown（加粗/斜体/行内代码/链接）交给系统解析；解析失败退回纯文本。
+    private static func inline(_ text: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace,
+            failurePolicy: .returnPartiallyParsedIfPossible)
+        return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+    }
+
+    private static func fontContainer(size: CGFloat, weight: Font.Weight) -> AttributeContainer {
+        var container = AttributeContainer()
+        container.font = .system(size: size, weight: weight)
+        return container
+    }
+
+    private static func foregroundContainer(_ color: Color) -> AttributeContainer {
+        var container = AttributeContainer()
+        container.foregroundColor = color
+        return container
+    }
+}
+
+/// 「发现新版本」窗口：发布说明经 UpdateNotesRenderer 渲染成富文本，
+/// 不再是原始符号裸奔的纯文本。
+struct UpdatePromptView: View {
     @ObservedObject private var center = UpdateCenter.shared
+    let release: UpdateCenter.ReleaseInfo
+
+    private var notes: AttributedString {
+        UpdateNotesRenderer.render(release.notes)
+    }
 
     var body: some View {
-        Group {
-            switch center.state {
-            case .downloading(let fraction):
-                TaskProgressCard(
-                    symbol: "arrow.down.circle",
-                    title: "正在下载更新",
-                    name: "FreeArc 新版本",
-                    fraction: fraction,
-                    detail: nil
-                ) {
-                    center.cancelDownload()
-                }
-            case .installing:
-                HStack(spacing: 10) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("正在安装更新…完成后将自动重启")
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 14) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 56, height: 56)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("FreeArc v\(release.version) 现已发布")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text("当前版本 v\(AppUpdate.currentVersion) · 安装包 \(afzByteText(release.assetSize))")
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.textSecondary)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 22)
-            default:
-                EmptyView()
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 14)
+
+            ScrollView {
+                Text(notes)
+                    .font(.system(size: 12.5))
+                    .lineSpacing(4)
+                    .foregroundStyle(Theme.textPrimary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+            .background(Theme.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cornerM))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cornerM)
+                    .strokeBorder(Theme.dividerColor, lineWidth: 0.5)
+            )
+            .padding(.horizontal, 20)
+
+            HStack(spacing: 12) {
+                Button(action: { center.skipUpdate() }) {
+                    Text("跳过此版本").secondaryCapsule()
+                }
+                .buttonStyle(.plain)
+                Spacer(minLength: 0)
+                Button(action: { center.deferUpdate() }) {
+                    Text("稍后提醒").secondaryCapsule()
+                }
+                .buttonStyle(.plain)
+                Button(action: { center.acceptUpdate() }) {
+                    Text("立即更新").primaryCapsule()
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.canvasBackground)
+    }
+}
+
+/// 下载 / 就绪 / 安装三阶段的进度窗口内容（一个窗口按状态机切换文案与动作）。
+struct UpdateProgressView: View {
+    @ObservedObject private var center = UpdateCenter.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 14) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 48, height: 48)
+                stageContent
+            }
+            HStack(spacing: 12) {
+                Spacer(minLength: 0)
+                actions
             }
         }
-        .padding(8)
-        .frame(width: 380)
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Theme.canvasBackground)
+    }
+
+    @ViewBuilder private var stageContent: some View {
+        switch center.state {
+        case .downloading(let fraction, let received, let total):
+            VStack(alignment: .leading, spacing: 8) {
+                Text("正在下载更新…")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                ProgressView(value: fraction)
+                    .progressViewStyle(.linear)
+                Text(progressDetail(received: received, total: total))
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textSecondary)
+                    .monospacedDigit()
+            }
+        case .readyToInstall(let release):
+            VStack(alignment: .leading, spacing: 8) {
+                Text("更新已下载，可以开始安装")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                ProgressView(value: 1.0)
+                    .progressViewStyle(.linear)
+                Text("FreeArc v\(release.version) 已就绪，安装会替换当前应用并重启。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        case .installing:
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("正在安装更新…")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text("完成后将自动重启应用，请勿关闭窗口")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+        default:
+            Text("准备更新…")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.textSecondary)
+        }
+    }
+
+    @ViewBuilder private var actions: some View {
+        switch center.state {
+        case .downloading:
+            Button(action: { center.cancelDownload() }) {
+                Text("取消").secondaryCapsule()
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+        case .readyToInstall:
+            Button(action: { center.installNow() }) {
+                Text("安装并重启应用").primaryCapsule()
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.defaultAction)
+        default:
+            EmptyView()
+        }
+    }
+
+    private func progressDetail(received: Int64, total: Int64) -> String {
+        if total > 0 {
+            return "\(afzByteText(received)) / \(afzByteText(total))"
+        }
+        return "已下载 \(afzByteText(received))"
     }
 }
