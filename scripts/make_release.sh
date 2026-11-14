@@ -5,6 +5,8 @@
 #   scripts/make_release.sh                # 本机架构 Release 包
 #   scripts/make_release.sh --universal    # 通用二进制（Apple 芯片 + Intel）
 #   scripts/make_release.sh --sign "Developer ID Application: 名字 (TEAMID)"
+#   scripts/make_release.sh --package-only # 不编译，直接打包现有 build/FreeArc.app
+#                                          # （手动编出通用包后用它出发布包）
 #
 # 版本号唯一来源是 Sources/ArcFreeZip/AppUpdate.swift 的 AppUpdate.currentVersion，
 # 打包时自动同步进 Info.plist；本脚本再从同一处取版本号拼资产名。
@@ -15,6 +17,20 @@ cd "$(dirname "$0")/.."
 APP_NAME="FreeArc"
 DIST="dist"
 
+# 参数分流：--package-only 归本脚本，其余原样交给 make_app.sh
+PACKAGE_ONLY=0
+WANT_UNIVERSAL=0
+BUILD_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --package-only) PACKAGE_ONLY=1 ;;
+        *)
+            [[ "$arg" == "--universal" ]] && WANT_UNIVERSAL=1
+            BUILD_ARGS+=("$arg")
+            ;;
+    esac
+done
+
 VERSION="$(sed -n 's/^    static let currentVersion = "\(.*\)"$/\1/p' \
     Sources/ArcFreeZip/AppUpdate.swift | head -1)"
 if [[ -z "$VERSION" ]]; then
@@ -23,16 +39,20 @@ if [[ -z "$VERSION" ]]; then
 fi
 
 echo "==> 版本 v$VERSION"
-echo "==> 打包应用"
-./scripts/make_app.sh "$@"
+if [[ $PACKAGE_ONLY -eq 1 ]]; then
+    echo "==> 跳过编译，打包现有 build/$APP_NAME.app"
+else
+    echo "==> 打包应用"
+    ./scripts/make_app.sh ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}
+fi
 
 APP="build/$APP_NAME.app"
 [[ -d "$APP" ]] || { echo "未生成 $APP" >&2; exit 1; }
 
-# 请求了通用二进制却只出单架构（交叉编译失败时 make_app.sh 会回退），必须让人看见
+# 请求了通用二进制却只出单架构（交叉编译失败时 make_app.sh 会回退，手动包也可能编错），必须让人看见
 ARCHS="$(lipo -archs "$APP/Contents/MacOS/$APP_NAME" 2>/dev/null || echo unknown)"
-if [[ "$*" == *--universal* && "$ARCHS" != *arm64* ]]; then
-    echo "!! 产物架构是 ${ARCHS}，不是通用二进制：交叉编译失败已回退，请换 Apple 芯片机器或 Xcode Archive 重出" >&2
+if [[ $WANT_UNIVERSAL -eq 1 && "$ARCHS" != *arm64* ]]; then
+    echo "!! 产物架构是 ${ARCHS}，不是通用二进制：请换 Apple 芯片机器构建或 Xcode Archive（generic macOS）" >&2
 fi
 
 # Info.plist 里的版本必须和资产名一致，否则客户端会比错版本
@@ -69,6 +89,7 @@ cat <<EOF
 
 ==> 发布包就绪
     文件：$ZIP
+    架构：$ARCHS
     大小：$((SIZE / 1024 / 1024)) MB（$SIZE 字节）
     SHA256：$SHA
 

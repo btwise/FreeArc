@@ -184,11 +184,20 @@ xcodebuild -configuration Release build
 **出发布包**：
 
 ```bash
-scripts/make_release.sh              # 本机架构
-scripts/make_release.sh --universal  # Apple 芯片 + Intel
+scripts/make_release.sh                # 本机架构
+scripts/make_release.sh --universal    # Apple 芯片 + Intel（需要能交叉编译）
+scripts/make_release.sh --package-only # 不编译，直接打包现有 build/FreeArc.app
 ```
 
-脚本会编译、校验签名、生成 `dist/FreeArc-<版本>.zip`（内部根目录就是 `FreeArc.app`），并打印 tag 名、大小与 SHA256。
+脚本会编译、校验签名、生成 `dist/FreeArc-<版本>.zip`（内部根目录就是 `FreeArc.app`），并打印架构、tag 名、大小与 SHA256。
+
+**出通用二进制**：`--universal` 依赖 SPM 交叉编译，个别环境会在宏插件处失败（脚本会回退本机架构并告警）。这时用 Xcode：打开 `FreeArc.xcodeproj` → 目标选 *Any Mac (Apple Silicon, Intel)* → Product → Archive，再从 Organizer 的 *Distribute App → Copy App* 导出 `FreeArc.app`，放进 `build/`，然后：
+
+```bash
+scripts/make_release.sh --package-only --universal
+```
+
+`--package-only` 只做「校验版本 + 校验签名 + 打包 + 打印 SHA256」，不会覆盖你手动编出来的通用包。
 
 **发 Release**：仓库 → Releases → Draft a new release，约定三条：
 
