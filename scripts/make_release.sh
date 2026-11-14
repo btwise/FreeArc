@@ -76,11 +76,17 @@ rm -f "$ZIP"
 # 少了它会解出一堆散文件，更新器找不到 .app 会直接报错。
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 
-# 复核包内结构
-if ! unzip -l "$ZIP" | grep -q " $APP_NAME.app/Contents/Info.plist"; then
-    echo "$ZIP 里没有 $APP_NAME.app/Contents/Info.plist，结构不对" >&2
-    exit 1
-fi
+# 复核包内结构。
+# 注意不要写成 `unzip -l "$ZIP" | grep -q ...`：grep 命中即退出，unzip 收到 SIGPIPE
+# 返回非零，配合 set -o pipefail 会把成功判成失败（包越大越容易踩到）。
+ENTRIES="$(unzip -Z1 "$ZIP" 2>/dev/null || true)"
+case "$ENTRIES" in
+    *"$APP_NAME.app/Contents/Info.plist"*) ;;
+    *)
+        echo "$ZIP 里没有 $APP_NAME.app/Contents/Info.plist，结构不对" >&2
+        exit 1
+        ;;
+esac
 
 SIZE="$(stat -f%z "$ZIP")"
 SHA="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
