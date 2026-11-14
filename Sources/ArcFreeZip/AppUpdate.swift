@@ -660,13 +660,17 @@ final class UpdateCenter: ObservableObject {
             return
         }
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 430, height: 168),
+            contentRect: NSRect(x: 0, y: 0, width: 430, height: 150),
             styleMask: [.titled, .closable], backing: .buffered, defer: false
         )
         window.title = "正在更新 FreeArc"
         window.isReleasedWhenClosed = false
         window.isMovableByWindowBackground = false
-        window.contentView = NSHostingView(rootView: UpdateProgressView())
+        // 高度交给内容决定（原生 sizingOptions）：下载/就绪/安装三个阶段内容高矮不同，
+        // 窗口随之收紧或放宽，不会出现写死高度留下的成片空白。
+        let hosting = NSHostingView(rootView: UpdateProgressView())
+        hosting.sizingOptions = .preferredContentSize
+        window.contentView = hosting
         window.center()
         progressCloseObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
@@ -985,13 +989,19 @@ struct UpdateProgressView: View {
                     .frame(width: 48, height: 48)
                 stageContent
             }
-            HStack(spacing: 12) {
-                Spacer(minLength: 0)
-                actions
+            if hasActions {
+                HStack(spacing: 12) {
+                    Spacer(minLength: 0)
+                    actions
+                }
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding(.horizontal, 20)
+        .padding(.top, 16)
+        .padding(.bottom, 18)
+        // 宽度固定、高度按内容自适应（配合 NSHostingView.sizingOptions），
+        // 不再撑满写死的窗口高度——否则内容顶对齐、下方整块留白。
+        .frame(width: 430, alignment: .topLeading)
         .background(Theme.canvasBackground)
     }
 
@@ -1037,6 +1047,14 @@ struct UpdateProgressView: View {
             Text("准备更新…")
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.textSecondary)
+        }
+    }
+
+    /// 仅下载（取消）与就绪（安装）两个阶段有按钮行；安装阶段没有，不占行高。
+    private var hasActions: Bool {
+        switch center.state {
+        case .downloading, .readyToInstall: return true
+        default: return false
         }
     }
 
