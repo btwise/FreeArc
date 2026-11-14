@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- FinderSync 扩展必须有 App Sandbox，PlugInKit 才会登记（对照 FastZip 扩展） -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- 「解压到指定文件夹…」的 NSOpenPanel 选择目录 -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<!-- 沙盒会把 ~/Library/Application Support 重定向到扩展容器，
+	     导致扩展读不到主程序写入的配置（开关全失效）。
+	     此豁免允许只读访问真实路径下的 FreeArc 配置目录。 -->
+	<key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
+	<array>
+		<string>/Library/Application Support/FreeArc/</string>
+	</array>
+</dict>
+</plist>

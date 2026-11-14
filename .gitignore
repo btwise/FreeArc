@@ -1,0 +1,19 @@
+# Xcode / SPM
+.build/
+build/
+# 工程文件要入库（FreeArc.xcodeproj），只忽略个人态与派生数据
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+DerivedData/
+# 第三方内核自带的工程文件不纳入版本管理
+Vendor/ZIPFoundation/*.xcodeproj/
+
+# macOS
+.DS_Store
+.DarwinHistory
+
+# 日志与临时文件
+*.log
+*.tmp
+dist/
