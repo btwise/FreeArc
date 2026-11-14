@@ -227,6 +227,8 @@ gh release create v1.2.0 dist/FreeArc-1.2.0.zip \
 
 **更新器行为**：启动 10 秒后静默检查（24 小时内最多一次，用 ETag 省 API 配额）；发现新版弹「下载并更新 / 跳过此版本 / 稍后」，跳过会持久化不再打扰；下载显示进度、可取消；安装是「清 quarantine → 解压 → staging 两段式替换当前应用 → 拉起新实例 → 旧实例退出」，失败按阶段提示原因。设置 → 通用「更新」卡可关闭自动检查、手动检查；后台任务形态（`-afz-background`）不联网。
 
+**API 限流与网页回退**：GitHub 对未登录 API 按 IP 计数（每小时 60 次），共享网络/代理出口容易被其他用户用光，此时 `releases/latest` 返回 403/429。更新器遇到限流会自动改走网页通道——`releases/latest` 页面 302 到 `/releases/tag/v<版本>` 直接拿版本号，安装包先试规范名 `FreeArc-<版本>.zip`、404 再解析 `expanded_assets` 页，大小用 HEAD 取 Content-Length。这条路拿不到 Release body，更新弹窗里会给出发布页链接代替更新说明。
+
 **升级包来源必须是完整签名**：ad-hoc 签名的包自己更新自己没问题（quarantine 由更新器清除），但对外分发建议 Developer ID + 公证，否则用户首次手动打开会被 Gatekeeper 拦。
 
 ## 常见问题

@@ -154,8 +154,13 @@ final class UpdateCenter: ObservableObject {
                 return
             }
             guard (200..<300).contains(http.statusCode) else {
-                throw UpdateError(message: "服务器返回 HTTP \(http.statusCode)"
-                    + (http.statusCode == 404 ? "（仓库还没有发布 Release）" : ""))
+                // 403/429 是 GitHub 按 IP 限流（未登录 60 次/小时，共享代理出口
+                // 很容易被用光）：先走网页回退通道，那条路也不通再给完整解释。
+                if http.statusCode == 403 || http.statusCode == 429 {
+                    if await checkViaWeb(manual: manual) { return }
+                }
+                throw UpdateError(message: Self.failedCheckMessage(
+                    status: http.statusCode, detail: Self.serverMessage(from: data)))
             }
             if let etag = http.value(forHTTPHeaderField: "ETag") {
                 AppSettings.updateETag = etag
@@ -199,6 +204,130 @@ final class UpdateCenter: ObservableObject {
         if let exact = assets.first(where: { $0.name.lowercased() == wanted }) { return exact }
         return assets.first {
             $0.name.lowercased().hasSuffix(".zip") && $0.name.lowercased().contains("freearc")
+        }
+    }
+
+    // MARK: 网页回退通道
+
+    /// 不碰 api.github.com 的检查通道（API 按 IP 限流，未登录每小时 60 次）：
+    /// - 版本号：releases/latest 页面会 302 到 /releases/tag/v<版本>，最终 URL 就是答案
+    /// - 资产：规范名 FreeArc-<版本>.zip 试 HEAD；404 再解析 expanded_assets 页拿真实名字
+    /// - 大小：对下载地址 HEAD（跟随跳转到对象存储），取 Content-Length
+    /// - 说明：这条通道拿不到 Release body，弹窗里给出发布页链接
+    ///
+    /// 返回 true 表示检查已出结论（有新版 / 已是最新）；false 表示这条路也走不通，
+    /// 由上层继续给出带原因的失败提示。
+    private func checkViaWeb(manual: Bool) async -> Bool {
+        let repo = AppUpdateConfig.effectiveRepo
+        let webBase = "https://github.com/\(repo.owner)/\(repo.name)"
+
+        guard let latest = URL(string: "\(webBase)/releases/latest"),
+              let tagPage = await Self.finalURL(of: latest),
+              let tag = Self.tagFromReleasesPageURL(tagPage) else { return false }
+        guard SemVer.compare(tag, to: AppUpdate.currentVersion) == .orderedDescending else {
+            state = .upToDate
+            if manual { presentUpToDateAlert() }
+            return true
+        }
+        let version = SemVer.normalized(tag)
+
+        guard let assetURL = await Self.webAssetURL(owner: repo.owner, name: repo.name, version: version) else {
+            return false
+        }
+        let size = await Self.remoteContentLength(of: assetURL)
+        let notes = "已通过 GitHub 发布页获取版本信息（API 限流，本次走网页回退通道）。\n"
+            + "更新内容请见发布页：\n\(tagPage.absoluteString)"
+        state = .available(ReleaseInfo(
+            version: version,
+            notes: notes,
+            downloadURL: assetURL,
+            assetSize: max(size, 0)
+        ))
+        if manual { presentUpdateDialog() }
+        return true
+    }
+
+    /// 跟随重定向后的最终 URL
+    private static func finalURL(of url: URL) async -> URL? {
+        guard let (_, response) = try? await URLSession.shared.data(for: webRequest(url)) else { return nil }
+        return response.url
+    }
+
+    /// `…/releases/tag/v1.2.0` → `v1.2.0`；不是发布页 URL 返回 nil
+    static func tagFromReleasesPageURL(_ url: URL) -> String? {
+        guard url.path.contains("/releases/tag/") else { return nil }
+        let tag = url.path.split(separator: "/").last.map(String.init) ?? ""
+        return tag.isEmpty ? nil : tag
+    }
+
+    /// 网页通道的资产定位：规范名优先，然后从 expanded_assets 页面解析
+    private static func webAssetURL(owner: String, name: String, version: String) async -> URL? {
+        let canonical = URL(string:
+            "https://github.com/\(owner)/\(name)/releases/download/v\(version)/FreeArc-\(version).zip")
+        if let canonical, await headStatus(of: canonical) == 200 { return canonical }
+
+        guard let assetsURL = URL(string:
+                "https://github.com/\(owner)/\(name)/releases/expanded_assets/v\(version)"),
+              let (data, _) = try? await URLSession.shared.data(for: webRequest(assetsURL)),
+              let html = String(data: data, encoding: .utf8) else { return nil }
+        let hrefs = zipAssetHrefs(in: html)
+        guard let picked = hrefs.first(where: { $0.lowercased().contains("freearc") }) ?? hrefs.first else {
+            return nil
+        }
+        return URL(string: "https://github.com\(picked)")
+    }
+
+    private static func webRequest(_ url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.setValue("FreeArc-Updater", forHTTPHeaderField: "User-Agent")
+        return request
+    }
+
+    private static func headStatus(of url: URL) async -> Int {
+        var request = webRequest(url)
+        request.httpMethod = "HEAD"
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return -1 }
+        return http.statusCode
+    }
+
+    private static func remoteContentLength(of url: URL) async -> Int64 {
+        var request = webRequest(url)
+        request.httpMethod = "HEAD"
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return 0 }
+        return max(http.expectedContentLength, 0)
+    }
+
+    /// expanded_assets 页面里 `href="…/releases/download/….zip"` 形式的资产链接
+    static func zipAssetHrefs(in html: String) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"href="([^"]*/releases/download/[^"]*\.zip)""#) else { return [] }
+        let ns = html as NSString
+        return regex.matches(in: html, range: NSRange(location: 0, length: ns.length))
+            .compactMap { Range($0.range(at: 1), in: html).map { String(html[$0]) } }
+    }
+
+    // MARK: 失败提示文案
+
+    /// 服务器 JSON 错误体里的 message（GitHub 限流时这里写明了原因）
+    private static func serverMessage(from data: Data?) -> String {
+        guard let data,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = object["message"] as? String else { return "" }
+        return message
+    }
+
+    private static func failedCheckMessage(status: Int, detail: String) -> String {
+        switch status {
+        case 403, 429:
+            return "GitHub 接口限流（HTTP \(status)）：未登录请求按出口 IP 计数，每小时 60 次，"
+                + "共享网络或代理出口容易被其他用户用光。稍后重试或更换网络/代理节点。"
+        case 404:
+            return "服务器返回 HTTP 404（仓库还没有发布 Release）"
+        default:
+            return "服务器返回 HTTP \(status)" + (detail.isEmpty ? "" : "：\(detail)")
         }
     }
 
