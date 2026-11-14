@@ -57,7 +57,7 @@ enum AppUpdateConfig {
 /// 本地版本号（**单一版本源**）。scripts/make_app.sh 打包时从这里抓取并
 /// 同步进 Info.plist 的 CFBundleShortVersionString，两处永远一致。
 enum AppUpdate {
-    static let currentVersion = "1.2.0"
+    static let currentVersion = "1.2.1"
 }
 
 // MARK: - 更新中心

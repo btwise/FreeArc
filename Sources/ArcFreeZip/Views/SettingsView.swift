@@ -5,7 +5,8 @@ import FinderShared
 // MARK: - 设置分区定义（框架）
 
 /// 设置分区。新增分区：加 case + title/icon/group/keywords，再在 contentArea 补对应页面视图。
-private enum SettingsSection: String, CaseIterable, Identifiable {
+/// 非私有：WindowRouting 的 openSettings(section:) 需要拿它做「定位到某分区」。
+enum SettingsSection: String, CaseIterable, Identifiable {
     case general, extract, compress, passwordBook, associations, boxShelf, advanced, about
 
     var id: String { rawValue }
@@ -73,13 +74,26 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
 
 // MARK: - 设置窗口（web 风格：左侧导航 + 右侧卡片分区）
 
+/// 跨窗口切换设置分区：设置窗口已存在时，路由用通知把目标分区送进来。
+extension Notification.Name {
+    static let afzSelectSettingsSection = Notification.Name("afz.selectSettingsSection")
+}
+
 /// 设计基准（现代 web 设置风格：左侧分区、右侧卡片，不用花哨框架）：
 /// - 左栏：搜索框 + 分组导航（原生 SF Symbol 图标）
 /// - 右侧：分区标题 caption + 圆角卡片，卡片内每行「标题/说明 在左、控件在右」
 /// - 全部控件使用原生 Picker / Toggle，样式跟随深浅色主题
 struct SettingsView: View {
-    /// 初始分区：探针可用 `AFZ_SETTINGS_SECTION=compress` 直接定位核对（默认通用页）
-    @State private var selected: SettingsSection = {
+    /// 初始分区：路由传入（应用菜单「关于 FreeArc」→ .about）；
+    /// 探针可用 `AFZ_SETTINGS_SECTION=compress` 直接定位核对（默认通用页）
+    @State private var selected: SettingsSection
+    @State private var searchText = ""
+
+    init(initialSection: SettingsSection? = nil) {
+        _selected = State(initialValue: initialSection ?? Self.probeSection)
+    }
+
+    private static var probeSection: SettingsSection {
         switch ProcessInfo.processInfo.environment["AFZ_SETTINGS_SECTION"] ?? "" {
         case "extract": .extract
         case "compress": .compress
@@ -90,8 +104,7 @@ struct SettingsView: View {
         case "about": .about
         default: .general
         }
-    }()
-    @State private var searchText = ""
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -102,6 +115,12 @@ struct SettingsView: View {
         }
         .frame(minWidth: 800, minHeight: 480)
         .background(Theme.canvasBackground)
+        // 设置窗口已存在时由路由广播目标分区（菜单「关于 FreeArc」的直达路径）
+        .onReceive(NotificationCenter.default.publisher(for: .afzSelectSettingsSection)) { note in
+            guard let section = note.object as? SettingsSection else { return }
+            selected = section
+            searchText = ""
+        }
     }
 
     // MARK: 侧栏

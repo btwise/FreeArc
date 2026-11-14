@@ -145,10 +145,15 @@ final class ArchiveWindowRouter {
         }
     }
 
-    /// 打开设置窗口（欢迎窗齿轮 / 应用菜单「设置…」共用；单例复用）。
-    func openSettings() {
+    /// 打开设置窗口（欢迎窗齿轮 / 应用菜单「设置…」「关于 FreeArc」共用；单例复用）。
+    /// 传 section 时定位到指定分区：新窗口以该分区初始化；已有窗口广播切换。
+    func openSettings(section: SettingsSection? = nil) {
         ensureRegularActivation()
         if let settingsWindow {
+            if let section {
+                NotificationCenter.default.post(
+                    name: .afzSelectSettingsSection, object: section)
+            }
             settingsWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -165,7 +170,7 @@ final class ArchiveWindowRouter {
         window.minSize = NSSize(width: 800, height: 480)
         window.isReleasedWhenClosed = false
         window.center()
-        window.contentView = NSHostingView(rootView: SettingsView())
+        window.contentView = NSHostingView(rootView: SettingsView(initialSection: section))
         settingsWindow = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

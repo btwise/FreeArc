@@ -81,9 +81,8 @@ enum AppMenuBar {
         mainMenu.addItem(appItem)
         let appMenu = NSMenu(title: "FreeArc")
         appItem.submenu = appMenu
-        appMenu.addItem(withTitle: "关于 FreeArc",
-                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
-                        keyEquivalent: "")
+        // 关于：进设置 → 关于页（系统默认 About 面板信息太少，设置页有版本、开源许可等完整内容）
+        appMenu.addItem(menuItem("关于 FreeArc", #selector(AppMenuActions.showAbout(_:)), key: "", routed: true))
         appMenu.addItem(.separator())
         appMenu.addItem(menuItem("设置…", #selector(AppMenuActions.openSettings(_:)), key: ",", routed: true))
         appMenu.addItem(menuItem("检查更新…", #selector(AppMenuActions.checkForUpdates(_:)), key: "", routed: true))
@@ -150,6 +149,11 @@ final class AppMenuActions: NSObject {
 
     @objc func openSettings(_ sender: Any?) {
         ArchiveWindowRouter.shared.openSettings()
+    }
+
+    /// 应用菜单「关于 FreeArc」：进设置 → 关于页，不用系统默认 About 面板。
+    @objc func showAbout(_ sender: Any?) {
+        ArchiveWindowRouter.shared.openSettings(section: .about)
     }
 
     @objc func checkForUpdates(_ sender: Any?) {
