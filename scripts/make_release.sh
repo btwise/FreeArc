@@ -45,6 +45,19 @@ if [[ -z "$VERSION" ]]; then
 fi
 
 echo "==> 版本 v$VERSION"
+
+# Resources/Info.plist 是 Xcode 直接构建时用的版本副本（make_app.sh 会在组装时覆盖它）。
+# 只在 AppUpdate.swift 改版本、忘了改它，Xcode 编出来的包就带着上一个版本号 —— 出包前先对齐。
+# 访达扩展的 plist 同理：两者版本不一致时 Xcode 会警告，也容易让用户装到旧扩展。
+for plist in Resources/Info.plist Resources/FinderSync-Info.plist; do
+    cur="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist" 2>/dev/null || true)"
+    if [[ "$cur" != "$VERSION" ]]; then
+        /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$plist"
+        /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$plist"
+        echo "==> ${plist} 版本 ${cur} → ${VERSION}（下次构建生效）"
+    fi
+done
+
 if [[ $PACKAGE_ONLY -eq 1 ]]; then
     echo "==> 跳过编译，打包现有 build/$APP_NAME.app"
 else
@@ -61,12 +74,24 @@ if [[ $WANT_UNIVERSAL -eq 1 && "$ARCHS" != *arm64* ]]; then
     echo "!! 产物架构是 ${ARCHS}，不是通用二进制：请换 Apple 芯片机器构建或 Xcode Archive（generic macOS）" >&2
 fi
 
-# Info.plist 里的版本必须和资产名一致，否则客户端会比错版本
+# Info.plist 里的版本必须和资产名一致，否则客户端会比错版本。
+# 产物是旧 plist 编出来的（Xcode 直接构建最常见）：就地改版本会让已有签名失效，
+# ad-hoc 包可以改完重签；Developer ID 包不能，只能重新构建。
+PLIST_IN_APP="$APP/Contents/Info.plist"
 PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
-    "$APP/Contents/Info.plist" 2>/dev/null || true)"
+    "$PLIST_IN_APP" 2>/dev/null || true)"
 if [[ "$PLIST_VERSION" != "$VERSION" ]]; then
-    echo "版本不一致：Info.plist=${PLIST_VERSION}，源码=${VERSION}" >&2
-    exit 1
+    if codesign -dv "$APP" 2>&1 | grep -q "Signature=adhoc"; then
+        echo "!! 产物版本 ${PLIST_VERSION} ≠ 源码 ${VERSION}：改 Info.plist 后重新 ad-hoc 签名" >&2
+        echo "   （下次直接构建就带着新版本号，不会走到这一步）" >&2
+        /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST_IN_APP"
+        /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$PLIST_IN_APP"
+        codesign --force --sign - --timestamp=none "$APP"
+    else
+        echo "版本不一致：Info.plist=${PLIST_VERSION}，源码=${VERSION}" >&2
+        echo "该包不是 ad-hoc 签名，不能就地重签，请用新版本号重新构建" >&2
+        exit 1
+    fi
 fi
 
 echo "==> 校验签名"

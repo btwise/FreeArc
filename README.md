@@ -200,6 +200,8 @@ scripts/make_release.sh --package-only --universal
 
 `--package-only` 只做「校验版本 + 校验签名 + 打包 + 打印 SHA256」，不会覆盖你手动编出来的通用包。
 
+手动出通用包的完整路子：Xcode 或 `xcodebuild -scheme FreeArc -configuration Release -destination 'generic/platform=macOS'` 构建（默认就是 arm64 + x86_64），把产物放到 `build/FreeArc.app`，再跑 `scripts/make_release.sh --package-only --universal`。打包前脚本会把 `Resources/Info.plist` 与访达扩展 plist 的版本号对齐到源码版本（ad-hoc 包就地重签），所以只改源码版本号也不会打出「版本对不上」的包。包内 7-Zip 内核是 7-Zip 官方通用二进制，构建时统一补 ad-hoc 签名：上游只有 arm64 切片带签名，裸的 x86_64 切片在 Apple 芯片上（含 Rosetta）会被内核直接杀掉。
+
 **写发布说明**：正文手写，放在 `ReleaseNotes/<版本>.md`（例：`ReleaseNotes/1.2.0.md`），会原样成为 Release body，也就是用户更新弹窗里读到的那段文字。缺文件时脚本会按提交记录生成草稿并提醒补充。
 
 写的时候注意两点：更新弹窗是纯文本视图（不渲染 Markdown），普通段落加 `-` 列表最稳，`##`、`**` 会原样显示成符号；不用在说明里手抄大小和 SHA256——脚本会自动把「安装包（架构、大小）」与 `SHA256` 追加到 `dist/FreeArc-<版本>-notes.md` 末尾，校验值永远抄不错。
