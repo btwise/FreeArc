@@ -1846,14 +1846,13 @@ private struct UpdateSettingsCard: View {
 }
 
 private struct AboutSettingsPage: View {
+    /// 版本号唯一真源是 AppUpdate.currentVersion（更新比较用的也是它）。
+    /// Info.plist 只是打包时同步出来的副本，从它读会出现「关于页显示 1.2.1、
+    /// 比较逻辑仍按 1.2.2 判断」的分裂状态——只改 plist 不改常量时就会误报「已是最新」。
     private var versionText: String {
-        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        let version = AppUpdate.currentVersion
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
-        switch (short, build) {
-        case let (short?, build?): return "\(short) (\(build))"
-        case let (short?, _): return short
-        default: return "1.0"
-        }
+        return build.map { "\(version) (\($0))" } ?? version
     }
 
     var body: some View {

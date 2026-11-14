@@ -174,6 +174,22 @@ enum AppSettings {
         }
     }
 
+    /// 上次拿到的远端最新版本号（与 ETag 同批写入）。304 时没有响应体，
+    /// 靠它判断「缓存里的版本是否已经比本地新」——否则降级/回退安装的机器
+    /// 会永远被判成「已是最新」。
+    private static let updateCachedVersionKey = "afz-update-cached-version"
+
+    static var updateCachedVersion: String? {
+        get { UserDefaults.standard.string(forKey: updateCachedVersionKey) }
+        set {
+            if let newValue, !newValue.isEmpty {
+                UserDefaults.standard.set(newValue, forKey: updateCachedVersionKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: updateCachedVersionKey)
+            }
+        }
+    }
+
     // MARK: - 压缩默认方案（压缩设置页；创建工作台 startCreation 时读取）
     private static let createPurposeKey = "afz-create-purpose"
     private static let createFormatKey = "afz-create-format"

@@ -147,7 +147,9 @@ final class UpdateCenter: ObservableObject {
         var request = URLRequest(url: AppUpdateConfig.apiURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("FreeArc-Updater", forHTTPHeaderField: "User-Agent")
-        if let etag = AppSettings.updateETag {
+        // 手动检查永远取新数据：带上旧 ETag 会被 304 挡住，用户刚装的回退版本
+        // 就永远看不到「有新版本」。ETag 只用于自动检查省配额。
+        if !manual, let etag = AppSettings.updateETag {
             request.setValue(etag, forHTTPHeaderField: "If-None-Match")
         }
         do {
@@ -157,7 +159,15 @@ final class UpdateCenter: ObservableObject {
                 throw UpdateError(message: "非 HTTP 响应")
             }
             if http.statusCode == 304 {
-                // ETag 命中：Release 信息自上次检查以来没有任何变化
+                // 304 只说「接口响应没变」，没给版本号。用上次缓存下来的远端版本
+                // 跟本地比：缓存里更新就必须丢掉 ETag 重新取一次，否则降级安装的
+                // 机器会一直被判成最新（v1.2.1 实测踩过）。
+                if let cached = AppSettings.updateCachedVersion,
+                   SemVer.compare("v\(cached)", to: AppUpdate.currentVersion) == .orderedDescending {
+                    AppSettings.updateETag = nil
+                    await check(manual: true)
+                    return
+                }
                 state = .upToDate
                 if manual { presentUpToDateAlert() }
                 return
@@ -175,6 +185,8 @@ final class UpdateCenter: ObservableObject {
                 AppSettings.updateETag = etag
             }
             let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+            // ETag 与「这次的远端版本」同批落盘，304 分支靠后者判断是否需要重取
+            AppSettings.updateCachedVersion = SemVer.normalized(release.tagName)
             guard SemVer.compare(release.tagName, to: AppUpdate.currentVersion) == .orderedDescending else {
                 state = .upToDate
                 if manual { presentUpToDateAlert() }
