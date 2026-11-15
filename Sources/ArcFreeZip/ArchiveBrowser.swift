@@ -2087,7 +2087,7 @@ final class ArchiveBrowser {
         let directory = hoverPreviewDirectory.appendingPathComponent(UUID().uuidString)
         let image = await Task.detached(priority: .userInitiated) {
             let image = ArchiveBrowser.generateThumbnail(
-                path: path, ext: ext, reader: reader, cacheDirectory: directory, maxPixel: 480
+                path: path, ext: ext, reader: reader, cacheDirectory: directory, maxPixel: 800
             )
             try? FileManager.default.removeItem(at: directory)
             return image

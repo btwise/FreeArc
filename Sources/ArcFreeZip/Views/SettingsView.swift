@@ -429,12 +429,12 @@ private struct GeneralSettingsPage: View {
         // 悬浮预览
         groupCaption("悬浮预览")
         SettingsCard {
-            SettingsRow(title: "开启悬浮预览", description: "鼠标在文件上停一下，就弹出小卡片，显示缩略图、名字和大小。", showsDivider: true) {
+            SettingsRow(title: "开启悬浮预览", description: "鼠标在文件上停一下，就地弹出大图预览，跟着鼠标走；图片、视频、音频直接看。", showsDivider: true) {
                 Toggle("", isOn: $hoverPreviewEnabled)
                     .toggleStyle(.switch)
                     .labelsHidden()
             }
-            SettingsRow(title: "在悬浮预览里播放视频", description: "MP4、MOV 这类常见视频可以直接在小卡片里播放；编码特殊的可能播不了。", showsDivider: true) {
+            SettingsRow(title: "在悬浮预览里播放视频", description: "MP4、MOV 这类常见视频在预览里直接播放；编码特殊的可能播不了。", showsDivider: true) {
                 Toggle("", isOn: $hoverVideoEnabled)
                     .toggleStyle(.switch)
                     .labelsHidden()
